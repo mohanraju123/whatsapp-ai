@@ -1,5 +1,4 @@
 require('dotenv').config();
-const { execSync } = require('child_process');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { Anthropic } = require('@anthropic-ai/sdk');
@@ -8,22 +7,11 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// On Railway (Nixpacks), use the system-installed Chromium instead of Puppeteer's
-// own downloaded binary -- the downloaded one can't find Nix's shared libraries.
-let executablePath;
-try {
-  executablePath = execSync('which chromium').toString().trim();
-  console.log(`Using system Chromium at: ${executablePath}`);
-} catch (err) {
-  console.log(`'which chromium' failed (${err.message}), trying broader search...`);
-  try {
-    executablePath = execSync('find /nix/store -maxdepth 4 -iname "chromium" -type f 2>/dev/null | head -1').toString().trim();
-    if (!executablePath) throw new Error('search returned nothing');
-    console.log(`Found Chromium via search at: ${executablePath}`);
-  } catch (err2) {
-    console.log(`Could not locate system Chromium (${err2.message}) -- falling back to Puppeteer's own bundled Chromium.`);
-    executablePath = undefined;
-  }
+// On Railway, the Dockerfile sets PUPPETEER_EXECUTABLE_PATH to apt's installed Chromium.
+// Locally on your Mac, this env var won't be set, so Puppeteer uses its own bundled Chromium.
+const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+if (executablePath) {
+  console.log(`Using Chromium at: ${executablePath}`);
 }
 
 const client = new Client({
