@@ -19,6 +19,7 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath,
+    protocolTimeout: 120000, // 2 min, up from Puppeteer's 30s default -- Railway's container can be slower
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
