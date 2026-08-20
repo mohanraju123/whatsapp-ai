@@ -19,7 +19,14 @@ const client = new Client({
   puppeteer: {
     headless: true,
     executablePath,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=IsolateOrigins,site-per-process'
+    ]
   }
 });
 
