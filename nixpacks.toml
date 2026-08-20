@@ -1,12 +1,5 @@
 [phases.setup]
-nixPkgs = [
-  "glib", "nss", "nspr", "atk", "cups", "dbus", "expat",
-  "fontconfig", "gtk3", "pango", "cairo", "alsa-lib",
-  "at-spi2-atk", "libdrm", "mesa", "xorg.libX11", "xorg.libxcb",
-  "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext",
-  "xorg.libXfixes", "xorg.libXrandr", "libxkbcommon",
-  "xorg.libXScrnSaver", "xorg.libxshmfence"
-]
+nixPkgs = ["chromium"]
 
 [phases.install]
 cmds = ["npm install"]

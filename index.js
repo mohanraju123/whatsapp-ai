@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { execSync } = require('child_process');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { Anthropic } = require('@anthropic-ai/sdk');
@@ -7,10 +8,22 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// On Railway (Nixpacks), use the system-installed Chromium instead of Puppeteer's
+// own downloaded binary -- the downloaded one can't find Nix's shared libraries.
+// Locally on your Mac, this will fail silently and Puppeteer falls back to its
+// own bundled Chromium, which is what you want there.
+let executablePath;
+try {
+  executablePath = execSync('which chromium').toString().trim();
+} catch (err) {
+  executablePath = undefined; // not found (e.g. local Mac) -> let Puppeteer use its own
+}
+
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
     headless: true,
+    executablePath,
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
 });
