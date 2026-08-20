@@ -26,6 +26,9 @@ const client = new Client({
 client.on('qr', (qr) => {
   console.log("Scan this QR code with your phone's WhatsApp to log in:");
   qrcode.generate(qr, { small: true });
+  console.log('\n--- RAW QR DATA (if the ASCII code above looks broken/misaligned) ---');
+  console.log('Paste this into: https://api.qrserver.com/v1/create-qr-code/?data=' + encodeURIComponent(qr));
+  console.log('--- (open that URL in a browser to see a clean, scannable QR image) ---\n');
 });
 
 let selfChatId = null;
