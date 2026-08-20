@@ -10,13 +10,20 @@ const anthropic = new Anthropic({
 
 // On Railway (Nixpacks), use the system-installed Chromium instead of Puppeteer's
 // own downloaded binary -- the downloaded one can't find Nix's shared libraries.
-// Locally on your Mac, this will fail silently and Puppeteer falls back to its
-// own bundled Chromium, which is what you want there.
 let executablePath;
 try {
   executablePath = execSync('which chromium').toString().trim();
+  console.log(`Using system Chromium at: ${executablePath}`);
 } catch (err) {
-  executablePath = undefined; // not found (e.g. local Mac) -> let Puppeteer use its own
+  console.log(`'which chromium' failed (${err.message}), trying broader search...`);
+  try {
+    executablePath = execSync('find /nix/store -maxdepth 4 -iname "chromium" -type f 2>/dev/null | head -1').toString().trim();
+    if (!executablePath) throw new Error('search returned nothing');
+    console.log(`Found Chromium via search at: ${executablePath}`);
+  } catch (err2) {
+    console.log(`Could not locate system Chromium (${err2.message}) -- falling back to Puppeteer's own bundled Chromium.`);
+    executablePath = undefined;
+  }
 }
 
 const client = new Client({
