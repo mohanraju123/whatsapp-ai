@@ -1,4 +1,5 @@
 require('dotenv').config();
+const cron = require('node-cron');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { Anthropic } = require('@anthropic-ai/sdk');
@@ -47,6 +48,16 @@ client.on('ready', () => {
   console.log('WhatsApp AI Assistant is ready and running!');
   console.log('Drafts will be sent to your self-chat:', selfChatId);
 
+  // --- Daily news headlines, 7:00 AM IST ---
+  cron.schedule('0 7 * * *', () => {
+    sendDailyNews();
+  }, { timezone: 'Asia/Kolkata' });
+
+  // --- Nightly self-chat cleanup, 12:00 AM IST ---
+  cron.schedule('0 0 * * *', () => {
+    cleanupSelfChat();
+  }, { timezone: 'Asia/Kolkata' });
+
   // Active health check every 60s -- catches silent drops that don't fire 'disconnected'.
   setInterval(async () => {
     try {
@@ -65,12 +76,74 @@ client.on('ready', () => {
   }, 60000);
 });
 
+async function sendDailyNews() {
+  try {
+    console.log('Fetching daily news headlines...');
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 500,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      messages: [{
+        role: 'user',
+        content: 'Search for today\'s top world/general news. Give me exactly 5 headlines, each as one short line with a 1-sentence summary. No preamble, no closing remarks -- just a numbered list of 5 headlines with summaries.'
+      }],
+    });
+
+    const newsText = response.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n')
+      .trim();
+
+    if (!newsText) {
+      console.error('No news text generated.');
+      return;
+    }
+
+    await client.sendMessage(selfChatId, `☀️ *Good morning! Today's headlines:*\n\n${newsText}`);
+    console.log('Daily news sent.');
+
+  } catch (error) {
+    console.error('Error fetching/sending daily news:', error);
+  }
+}
+
+// Prefixes that mark a message as bot-generated (drafts, confirmations, news).
+// Anything NOT starting with one of these is treated as a personal note and left alone.
+const BOT_MESSAGE_MARKERS = ['📝', '✅', '❌', 'ℹ️', '☀️'];
+
+async function cleanupSelfChat() {
+  try {
+    console.log('Running nightly self-chat cleanup...');
+    const chat = await client.getChatById(selfChatId);
+    const messages = await chat.fetchMessages({ limit: 500 });
+
+    let deletedCount = 0;
+    for (const msg of messages) {
+      if (!msg.fromMe) continue; // only ever touch messages the bot itself could have sent
+      const body = (msg.body || '').trim();
+      const isBotMessage = BOT_MESSAGE_MARKERS.some(marker => body.startsWith(marker));
+      if (!isBotMessage) continue; // leave personal notes untouched
+
+      try {
+        await msg.delete(true);
+        deletedCount++;
+      } catch (err) {
+        console.error(`Could not delete a message during cleanup: ${err.message}`);
+      }
+    }
+
+    console.log(`Self-chat cleanup done. Deleted ${deletedCount} bot message(s).`);
+
+  } catch (error) {
+    console.error('Error during self-chat cleanup:', error);
+  }
+}
+
 client.on('disconnected', (reason) => {
   console.error(`\n⚠️  Session disconnected: ${reason}`);
-  console.error('Attempting to reconnect in 5 seconds...\n');
-  setTimeout(() => {
-    client.initialize();
-  }, 5000);
+  console.error('Exiting so the process can be restarted fresh...\n');
+  process.exit(1);
 });
 
 client.on('auth_failure', (msg) => {
@@ -203,9 +276,19 @@ function parseDraftResponse(rawText) {
 
 client.on('message_create', async (msg) => {
 
-  // --- Case 1: a command typed in your self-chat -> acts on the oldest pending draft ---
+  // --- Case 1: a command typed in your self-chat -> acts on the oldest pending draft, or a utility command ---
   if (msg.fromMe && msg.from === selfChatId) {
     const body = msg.body.trim();
+
+    // Utility commands -- test features on demand instead of waiting for their schedule
+    if (body.toLowerCase() === 'news') {
+      await sendDailyNews();
+      return;
+    }
+    if (body.toLowerCase() === 'cleanup') {
+      await cleanupSelfChat();
+      return;
+    }
 
     const isYes = body.toLowerCase() === 'y';
     const isNo = body.toLowerCase() === 'n';
