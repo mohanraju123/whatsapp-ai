@@ -77,9 +77,91 @@ client.on('auth_failure', (msg) => {
   console.error('You will likely need to delete .wwebjs_auth and rescan the QR code.\n');
 });
 
-// --- Per-contact conversation memory ---
+// ============================================================
+// BIRTHDAY WISH FEATURE (groups)
+// ============================================================
+
+// The group chat IDs you want this to run in. Format: '<numbers>@g.us'
+// Leave empty to watch ALL groups, or list specific ones to restrict it.
+const ALLOWED_GROUPS = [
+  // '120363012345678901@g.us',
+  // '120363019876543210@g.us',
+];
+
+// Loose pre-filter: cheap check to avoid calling Claude on every single group message.
+// Deliberately broad -- the real "is this actually a birthday wish?" judgment happens
+// via Claude below, so false positives here are fine (they just get filtered next).
+const BIRTHDAY_REGEX = /birthday|hbd|b'?day|returns?\s+of\s+the\s+day/i;
+
+// Tracks who's already been wished, per group, per day -- so it only fires once per
+// person even if multiple people post variations of a birthday wish for the same person.
+const wishedTracker = new Set(); // holds strings like "groupId|name|YYYY-MM-DD"
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+const BIRTHDAY_SYSTEM_PROMPT = `You are reading a WhatsApp group message to determine if it is wishing someone a happy birthday. This could be phrased many different ways, for example: "happy birthday", "happiest birthday", "hbd", "many happy returns of the day", "many happy returns", "wishing you an amazing birthday", "b'day wishes", etc. -- and many other natural phrasings with the same meaning.
+
+If the message IS wishing someone a birthday: respond with ONLY that person's first name, exactly as it appears (or the word UNKNOWN if a wish is clearly present but no name is identifiable).
+
+If the message is NOT a birthday wish (e.g. it just mentions "birthday" in an unrelated way, like recounting a past party): respond with ONLY the exact word: NOT_BIRTHDAY
+
+Respond with ONLY the name, UNKNOWN, or NOT_BIRTHDAY -- nothing else, no punctuation, no extra words.`;
+
+function parseBirthdayResponse(rawText) {
+  const result = rawText.trim().split('\n')[0].trim();
+  return { result };
+}
+
+async function handleBirthdayMessage(msg) {
+  if (ALLOWED_GROUPS.length && !ALLOWED_GROUPS.includes(msg.from)) return;
+  if (!BIRTHDAY_REGEX.test(msg.body)) return; // cheap pre-filter, avoids an API call for obviously unrelated messages
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 20,
+      system: BIRTHDAY_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: msg.body }],
+    });
+
+    const { result } = parseBirthdayResponse(response.content[0].text);
+
+    if (result.toUpperCase() === 'NOT_BIRTHDAY') return; // Claude confirmed it's not actually a birthday wish
+
+    const name = result;
+
+    // Fixed template -- no AI-generated wording, exactly "Happy Birthday <Name> 🎂"
+    const wish = name.toUpperCase() === 'UNKNOWN'
+      ? 'Happy Birthday! 🎂'
+      : `Happy Birthday ${name}! 🎂`;
+
+    const today = todayStr();
+    const dedupeKey = `${msg.from}|${name.toLowerCase()}|${today}`;
+    if (wishedTracker.has(dedupeKey)) return; // already wished this person in this group today
+
+    wishedTracker.add(dedupeKey);
+
+    setTimeout(async () => {
+      try {
+        await client.sendMessage(msg.from, wish);
+        console.log(`Sent birthday wish in ${msg.from} for "${name}": ${wish}`);
+      } catch (err) {
+        console.error('Error sending birthday wish:', err);
+      }
+    }, 3000 + Math.random() * 4000); // random 3-7s delay, avoids looking instant/robotic
+
+  } catch (error) {
+    console.error('Error generating birthday wish:', error);
+  }
+}
+
+// ============================================================
+// PER-CONTACT DRAFT-AND-APPROVE FEATURE (1:1 chats)
+// ============================================================
+
 // key: contactId -> array of { role: 'user'|'assistant', content: string }
-// Capped to the last MEMORY_LIMIT entries per contact, so prompts stay small and cheap.
 const conversationMemory = new Map();
 const MEMORY_LIMIT = 8; // ~4 exchanges of context per contact
 
@@ -115,7 +197,6 @@ function parseDraftResponse(rawText) {
       draftText: lines.slice(1).join('\n').trim()
     };
   }
-  // Model didn't follow the format -- fail safe, treat whole thing as the draft, not urgent.
   return { urgent: false, draftText: rawText.trim() };
 }
 
@@ -127,16 +208,16 @@ client.on('message_create', async (msg) => {
 
     const isYes = body.toLowerCase() === 'y';
     const isNo = body.toLowerCase() === 'n';
-    const sendMatch = body.match(/^send:\s*(.+)$/is); // "send: custom text"
+    const sendMatch = body.match(/^send:\s*(.+)$/is);
 
-    if (!isYes && !isNo && !sendMatch) return; // not a command, ignore entirely (e.g. personal notes)
+    if (!isYes && !isNo && !sendMatch) return;
 
     if (pendingQueue.length === 0) {
       await client.sendMessage(selfChatId, 'ℹ️ No pending drafts to act on.');
       return;
     }
 
-    const pending = pendingQueue.shift(); // take the oldest
+    const pending = pendingQueue.shift();
     let finalText = null;
 
     if (isYes) {
@@ -150,7 +231,7 @@ client.on('message_create', async (msg) => {
     if (finalText) {
       await client.sendMessage(pending.contactId, finalText);
       await client.sendMessage(selfChatId, `✅ Sent to ${pending.contactLabel}: "${finalText}"`);
-      pushMemory(pending.contactId, 'assistant', finalText); // remember what was actually sent
+      pushMemory(pending.contactId, 'assistant', finalText);
     }
 
     if (pendingQueue.length > 0) {
@@ -160,7 +241,15 @@ client.on('message_create', async (msg) => {
     return;
   }
 
-  // --- Case 2: incoming message from ANY individual (not a group, not yourself) -> draft a reply ---
+  // --- Case 2: group message -> check for birthday wishes ---
+  if (msg.from.endsWith('@g.us')) {
+    if (!msg.fromMe) {
+      await handleBirthdayMessage(msg);
+    }
+    return;
+  }
+
+  // --- Case 3: incoming message from ANY individual (not a group, not yourself) -> draft a reply ---
   const isIndividualChat = msg.from.endsWith('@c.us') || msg.from.endsWith('@lid');
   const isFromSomeoneElse = !msg.fromMe;
   const isNotSelfChat = msg.from !== selfChatId;
@@ -170,8 +259,6 @@ client.on('message_create', async (msg) => {
     try {
       chat = await msg.getChat();
     } catch (err) {
-      // Can't confirm chat status due to a known library/@lid resolution bug.
-      // Proceeding as unlocked, since this was previously blocking 100% of messages.
       console.log(`Could not verify lock status (proceeding as unlocked): ${msg.from} — error: ${err.message}`);
     }
 
@@ -195,7 +282,7 @@ client.on('message_create', async (msg) => {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 200,
         system: DRAFT_SYSTEM_PROMPT,
-        messages: history, // includes the just-added incoming message as the latest entry
+        messages: history,
       });
 
       const { urgent, draftText } = parseDraftResponse(response.content[0].text);
