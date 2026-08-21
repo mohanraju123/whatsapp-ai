@@ -77,10 +77,47 @@ client.on('auth_failure', (msg) => {
   console.error('You will likely need to delete .wwebjs_auth and rescan the QR code.\n');
 });
 
-// Queue-based approval tracking. No message IDs involved -- avoids the
-// getQuotedMessage()/sendMessage() ID-capture bugs we kept hitting.
-// Oldest pending draft (index 0) is always the "active" one.
+// --- Per-contact conversation memory ---
+// key: contactId -> array of { role: 'user'|'assistant', content: string }
+// Capped to the last MEMORY_LIMIT entries per contact, so prompts stay small and cheap.
+const conversationMemory = new Map();
+const MEMORY_LIMIT = 8; // ~4 exchanges of context per contact
+
+function pushMemory(contactId, role, content) {
+  if (!conversationMemory.has(contactId)) conversationMemory.set(contactId, []);
+  const history = conversationMemory.get(contactId);
+  history.push({ role, content });
+  if (history.length > MEMORY_LIMIT) history.shift();
+}
+
+// Queue-based approval tracking (no message IDs -- avoids library bugs we hit with
+// getQuotedMessage()/sendMessage() ID capture). Oldest pending draft is always "active".
 const pendingQueue = []; // [{ contactId, contactLabel, draftText }, ...]
+
+const DRAFT_SYSTEM_PROMPT = `You are a helpful, casual, brief personal AI assistant drafting WhatsApp replies on behalf of the user.
+
+Rules:
+- Keep replies short: 1-2 sentences max.
+- Match the contact's tone: if they write casually (slang, no punctuation, emoji), reply casually. If they write formally, reply more formally. Base this on their message and the conversation history if provided.
+- If the contact's message is in a language other than English, write your reply in THAT SAME language.
+- Assess the incoming message for urgency or emotional distress (e.g. genuine emergencies, upset/angry tone, time-sensitive asks). Most everyday messages are NOT urgent.
+
+Output format (follow EXACTLY, two lines):
+Line 1: either the word URGENT or the word NORMAL (nothing else on this line)
+Line 2: ONLY the drafted reply text (nothing else -- no labels, no quotes)`;
+
+function parseDraftResponse(rawText) {
+  const lines = rawText.trim().split('\n');
+  const flagLine = (lines[0] || '').trim().toUpperCase();
+  if (flagLine === 'URGENT' || flagLine === 'NORMAL') {
+    return {
+      urgent: flagLine === 'URGENT',
+      draftText: lines.slice(1).join('\n').trim()
+    };
+  }
+  // Model didn't follow the format -- fail safe, treat whole thing as the draft, not urgent.
+  return { urgent: false, draftText: rawText.trim() };
+}
 
 client.on('message_create', async (msg) => {
 
@@ -88,13 +125,11 @@ client.on('message_create', async (msg) => {
   if (msg.fromMe && msg.from === selfChatId) {
     const body = msg.body.trim();
 
-    // Safety guard: only these exact patterns are treated as commands.
-    // Anything else (e.g. a personal note) is left alone, even if a draft is pending.
     const isYes = body.toLowerCase() === 'y';
     const isNo = body.toLowerCase() === 'n';
     const sendMatch = body.match(/^send:\s*(.+)$/is); // "send: custom text"
 
-    if (!isYes && !isNo && !sendMatch) return; // not a command, ignore entirely
+    if (!isYes && !isNo && !sendMatch) return; // not a command, ignore entirely (e.g. personal notes)
 
     if (pendingQueue.length === 0) {
       await client.sendMessage(selfChatId, 'ℹ️ No pending drafts to act on.');
@@ -115,6 +150,7 @@ client.on('message_create', async (msg) => {
     if (finalText) {
       await client.sendMessage(pending.contactId, finalText);
       await client.sendMessage(selfChatId, `✅ Sent to ${pending.contactLabel}: "${finalText}"`);
+      pushMemory(pending.contactId, 'assistant', finalText); // remember what was actually sent
     }
 
     if (pendingQueue.length > 0) {
@@ -152,14 +188,17 @@ client.on('message_create', async (msg) => {
     }
 
     try {
+      pushMemory(msg.from, 'user', msg.body);
+      const history = conversationMemory.get(msg.from) || [];
+
       const response = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 150,
-        system: "You are a helpful, casual, and brief personal AI assistant. Reply naturally. Keep responses short (1-2 sentences max).",
-        messages: [{ role: 'user', content: msg.body }],
+        max_tokens: 200,
+        system: DRAFT_SYSTEM_PROMPT,
+        messages: history, // includes the just-added incoming message as the latest entry
       });
 
-      const draftText = response.content[0].text.trim();
+      const { urgent, draftText } = parseDraftResponse(response.content[0].text);
 
       const contact = await msg.getContact();
       const contactLabel = contact.pushname || contact.name || contact.number;
@@ -167,9 +206,11 @@ client.on('message_create', async (msg) => {
       pendingQueue.push({ contactId: msg.from, contactLabel, draftText });
 
       const queuePosition = pendingQueue.length;
+      const urgentTag = urgent ? '🚨 *URGENT* — ' : '';
+
       await client.sendMessage(
         selfChatId,
-        `📝 Draft reply for *${contactLabel}* (queue #${queuePosition}):\n\n"${draftText}"\n\nReply in THIS self-chat with:\n- "y" to send the OLDEST pending draft as-is\n- "n" to skip the OLDEST pending draft\n- "send: your text" to send custom text for the OLDEST pending draft`
+        `📝 ${urgentTag}Draft reply for *${contactLabel}* (queue #${queuePosition}):\n\n"${draftText}"\n\nReply in THIS self-chat with:\n- "y" to send the OLDEST pending draft as-is\n- "n" to skip the OLDEST pending draft\n- "send: your text" to send custom text for the OLDEST pending draft`
       );
 
     } catch (error) {
